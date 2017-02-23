@@ -37,6 +37,7 @@ type DockerClient interface {
 	Info(ctx context.Context) (types.Info, error)
 	ContainerList(ctx context.Context, options types.ContainerListOptions) ([]types.Container, error)
 	ContainerStats(ctx context.Context, containerID string, stream bool) (io.ReadCloser, error)
+	ContainerInspect(ctx context.Context, containerID string) (types.ContainerJSON, error)
 }
 
 // KB, MB, GB, TB, PB...human friendly
@@ -247,6 +248,46 @@ func (d *Docker) gatherContainer(
 
 	ctx, cancel := context.WithTimeout(context.Background(), d.Timeout.Duration)
 	defer cancel()
+
+	ins, err := d.client.ContainerInspect(ctx, container.ID)
+	envvars := ins.Config.Env
+	e := strings.SplitN(envvars[0], "=", 2)
+	/*var eName string = e[0]
+	var eValue string = e[1]*/
+	for _, envvar := range envvars {
+		/*tags["TESTVAR0"] = e[0]
+		tags["TESTVAR1"] = e[1]*/
+		if e[0] == "MESOS_TASK_ID" {
+			tags["MESOS_TASK_ID"] = e[1]
+		} else if e[0] == "MARATHON_APP_RESSOURCE_CPUS" {
+			tags["MARATHON_APP_RESSOURCE_CPUS"] = e[0]
+		} else if e[0] == "MARATHON_APP_RESSOURCE_GPUS" {
+			tags["MARATHON_APP_RESSOURCE_GPUS"] = e[0]
+		} else if e[0] == "MARATHON_APP_RESSOURCE_DISK" {
+			tags["MARATHON_APP_RESSOURCE_DISK"] = e[0]
+		} else if e[0] == "MARATHON_APP_RESSOURCE_MEM" {
+			tags["MARATHON_APP_RESSOURCE_MEM"] = e[0]
+		} else if e[0] == "MESOS_CONTAINER_NAME" {
+			tags["MESOS_CONTAINER_NAME"] = e[0]
+		} else if e[0] == "MARATHON_APP_ID" {
+			tags["MARATHON_APP_ID"] = e[0]
+		}
+		/*swith eName {
+		case "MESOS_TASK_ID":
+			tags["MESOS_TASK"] = strings.Split(eValue, ".")
+			tags["MESOS_TASK_ID"] = eValue
+		case "MARATHON_APP_RESSOURCE_CPUS":
+			tags["MARATHON_APP_RESSOURCE_CPUS"] = eValue
+		case "MARATHON_APP_RESSOURCE_MEM":
+			tags["MARATHON_APP_RESSOURCE_MEM"] = strconv.ParseInt(eValue, 10, 16)
+		default:
+			tags["is_mesos"] = false
+		}*/
+		e = strings.SplitN(envvar, "=", 2)
+		/*eName = e[0]
+		eValue = e[1]*/
+	}
+
 	r, err := d.client.ContainerStats(ctx, container.ID, false)
 	if err != nil {
 		return fmt.Errorf("Error getting docker stats: %s", err.Error())
