@@ -255,8 +255,6 @@ func (d *Docker) gatherContainer(
 	/*var eName string = e[0]
 	var eValue string = e[1]*/
 	for _, envvar := range envvars {
-		/*tags["TESTVAR0"] = e[0]
-		tags["TESTVAR1"] = e[1]*/
 		if e[0] == "MESOS_TASK_ID" {
 			tags["MESOS_TASK_ID"] = e[1]
 		} else if e[0] == "MARATHON_APP_RESSOURCE_CPUS" {
@@ -272,20 +270,7 @@ func (d *Docker) gatherContainer(
 		} else if e[0] == "MARATHON_APP_ID" {
 			tags["MARATHON_APP_ID"] = e[0]
 		}
-		/*swith eName {
-		case "MESOS_TASK_ID":
-			tags["MESOS_TASK"] = strings.Split(eValue, ".")
-			tags["MESOS_TASK_ID"] = eValue
-		case "MARATHON_APP_RESSOURCE_CPUS":
-			tags["MARATHON_APP_RESSOURCE_CPUS"] = eValue
-		case "MARATHON_APP_RESSOURCE_MEM":
-			tags["MARATHON_APP_RESSOURCE_MEM"] = strconv.ParseInt(eValue, 10, 16)
-		default:
-			tags["is_mesos"] = false
-		}*/
 		e = strings.SplitN(envvar, "=", 2)
-		/*eName = e[0]
-		eValue = e[1]*/
 	}
 
 	r, err := d.client.ContainerStats(ctx, container.ID, false)
