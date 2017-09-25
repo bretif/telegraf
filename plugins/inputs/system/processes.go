@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"syscall"
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/inputs"
@@ -57,7 +58,7 @@ func (p *Processes) Gather(acc telegraf.Accumulator) error {
 		}
 	}
 
-	acc.AddFields("processes", fields, nil)
+	acc.AddGauge("processes", fields, nil)
 	return nil
 }
 
@@ -81,6 +82,7 @@ func getEmptyFields() map[string]interface{} {
 	case "openbsd":
 		fields["idle"] = int64(0)
 	case "linux":
+		fields["dead"] = int64(0)
 		fields["paging"] = int64(0)
 		fields["total_threads"] = int64(0)
 	}
@@ -107,6 +109,8 @@ func (p *Processes) gatherFromPS(fields map[string]interface{}) error {
 			fields["blocked"] = fields["blocked"].(int64) + int64(1)
 		case 'Z':
 			fields["zombies"] = fields["zombies"].(int64) + int64(1)
+		case 'X':
+			fields["dead"] = fields["dead"].(int64) + int64(1)
 		case 'T':
 			fields["stopped"] = fields["stopped"].(int64) + int64(1)
 		case 'R':
@@ -118,7 +122,7 @@ func (p *Processes) gatherFromPS(fields map[string]interface{}) error {
 		case '?':
 			fields["unknown"] = fields["unknown"].(int64) + int64(1)
 		default:
-			log.Printf("processes: Unknown state [ %s ] from ps",
+			log.Printf("I! processes: Unknown state [ %s ] from ps",
 				string(status[0]))
 		}
 		fields["total"] = fields["total"].(int64) + int64(1)
@@ -128,14 +132,14 @@ func (p *Processes) gatherFromPS(fields map[string]interface{}) error {
 
 // get process states from /proc/(pid)/stat files
 func (p *Processes) gatherFromProc(fields map[string]interface{}) error {
-	filenames, err := filepath.Glob("/proc/[0-9]*/stat")
+	filenames, err := filepath.Glob(GetHostProc() + "/[0-9]*/stat")
+
 	if err != nil {
 		return err
 	}
 
 	for _, filename := range filenames {
 		_, err := os.Stat(filename)
-
 		data, err := p.readProcFile(filename)
 		if err != nil {
 			return err
@@ -164,19 +168,21 @@ func (p *Processes) gatherFromProc(fields map[string]interface{}) error {
 			fields["blocked"] = fields["blocked"].(int64) + int64(1)
 		case 'Z':
 			fields["zombies"] = fields["zombies"].(int64) + int64(1)
+		case 'X':
+			fields["dead"] = fields["dead"].(int64) + int64(1)
 		case 'T', 't':
 			fields["stopped"] = fields["stopped"].(int64) + int64(1)
 		case 'W':
 			fields["paging"] = fields["paging"].(int64) + int64(1)
 		default:
-			log.Printf("processes: Unknown state [ %s ] in file %s",
+			log.Printf("I! processes: Unknown state [ %s ] in file %s",
 				string(stats[0][0]), filename)
 		}
 		fields["total"] = fields["total"].(int64) + int64(1)
 
 		threads, err := strconv.Atoi(string(stats[17]))
 		if err != nil {
-			log.Printf("processes: Error parsing thread count: %s", err)
+			log.Printf("I! processes: Error parsing thread count: %s", err)
 			continue
 		}
 		fields["total_threads"] = fields["total_threads"].(int64) + int64(threads)
@@ -190,6 +196,13 @@ func readProcFile(filename string) ([]byte, error) {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
+
+		// Reading from /proc/<PID> fails with ESRCH if the process has
+		// been terminated between open() and read().
+		if perr, ok := err.(*os.PathError); ok && perr.Err == syscall.ESRCH {
+			return nil, nil
+		}
+
 		return nil, err
 	}
 

@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -30,7 +29,7 @@ type Mesos struct {
 	MasterCols []string `toml:"master_collections"`
 	Slaves     []string
 	SlaveCols  []string `toml:"slave_collections"`
-	SlaveTasks bool
+	//SlaveTasks bool
 }
 
 var allMetrics = map[Role][]string{
@@ -66,8 +65,6 @@ var sampleConfig = `
   #   "tasks",
   #   "messages",
   # ]
-  ## Include mesos tasks statistics, default is false
-  # slave_tasks = true
 `
 
 // SampleConfig returns a sample configuration block
@@ -90,7 +87,7 @@ func (m *Mesos) SetDefaults() {
 	}
 
 	if m.Timeout == 0 {
-		log.Println("[mesos] Missing timeout value, setting default value (100ms)")
+		log.Println("I! [mesos] Missing timeout value, setting default value (100ms)")
 		m.Timeout = 100
 	}
 }
@@ -98,16 +95,13 @@ func (m *Mesos) SetDefaults() {
 // Gather() metrics from given list of Mesos Masters
 func (m *Mesos) Gather(acc telegraf.Accumulator) error {
 	var wg sync.WaitGroup
-	var errorChannel chan error
 
 	m.SetDefaults()
-
-	errorChannel = make(chan error, len(m.Masters)+2*len(m.Slaves))
 
 	for _, v := range m.Masters {
 		wg.Add(1)
 		go func(c string) {
-			errorChannel <- m.gatherMainMetrics(c, ":5050", MASTER, acc)
+			acc.AddError(m.gatherMainMetrics(c, ":5050", MASTER, acc))
 			wg.Done()
 			return
 		}(v)
@@ -116,37 +110,25 @@ func (m *Mesos) Gather(acc telegraf.Accumulator) error {
 	for _, v := range m.Slaves {
 		wg.Add(1)
 		go func(c string) {
-			errorChannel <- m.gatherMainMetrics(c, ":5051", SLAVE, acc)
+			acc.AddError(m.gatherMainMetrics(c, ":5051", SLAVE, acc))
 			wg.Done()
 			return
 		}(v)
 
-		if !m.SlaveTasks {
-			continue
-		}
+		// if !m.SlaveTasks {
+		// 	continue
+		// }
 
-		wg.Add(1)
-		go func(c string) {
-			errorChannel <- m.gatherSlaveTaskMetrics(c, ":5051", acc)
-			wg.Done()
-			return
-		}(v)
+		// wg.Add(1)
+		// go func(c string) {
+		// 	acc.AddError(m.gatherSlaveTaskMetrics(c, ":5051", acc))
+		// 	wg.Done()
+		// 	return
+		// }(v)
 	}
 
 	wg.Wait()
-	close(errorChannel)
-	errorStrings := []string{}
 
-	// Gather all errors for returning them at once
-	for err := range errorChannel {
-		if err != nil {
-			errorStrings = append(errorStrings, err.Error())
-		}
-	}
-
-	if len(errorStrings) > 0 {
-		return errors.New(strings.Join(errorStrings, "\n"))
-	}
 	return nil
 }
 
@@ -385,7 +367,7 @@ func getMetrics(role Role, group string) []string {
 	ret, ok := m[group]
 
 	if !ok {
-		log.Printf("[mesos] Unkown %s metrics group: %s\n", role, group)
+		log.Printf("I! [mesos] Unkown %s metrics group: %s\n", role, group)
 		return []string{}
 	}
 
@@ -459,7 +441,6 @@ func (m *Mesos) gatherSlaveTaskMetrics(address string, defaultPort string, acc t
 	}
 
 	for _, task := range metrics {
-		tags["task_id"] = task.ExecutorID
 		tags["framework_id"] = task.FrameworkID
 
 		jf := jsonparser.JSONFlattener{}
@@ -468,7 +449,9 @@ func (m *Mesos) gatherSlaveTaskMetrics(address string, defaultPort string, acc t
 		if err != nil {
 			return err
 		}
+
 		timestamp := time.Unix(int64(jf.Fields["timestamp"].(float64)), 0)
+		jf.Fields["executor_id"] = task.ExecutorID
 
 		acc.AddFields("mesos_tasks", jf.Fields, tags, timestamp)
 	}

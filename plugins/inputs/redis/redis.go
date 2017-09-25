@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/internal/errchan"
 	"github.com/influxdata/telegraf/plugins/inputs"
 )
 
@@ -44,40 +43,9 @@ func (r *Redis) Description() string {
 }
 
 var Tracking = map[string]string{
-	"uptime_in_seconds":           "uptime",
-	"connected_clients":           "clients",
-	"used_memory":                 "used_memory",
-	"used_memory_rss":             "used_memory_rss",
-	"used_memory_peak":            "used_memory_peak",
-	"used_memory_lua":             "used_memory_lua",
-	"rdb_changes_since_last_save": "rdb_changes_since_last_save",
-	"total_connections_received":  "total_connections_received",
-	"total_commands_processed":    "total_commands_processed",
-	"instantaneous_ops_per_sec":   "instantaneous_ops_per_sec",
-	"instantaneous_input_kbps":    "instantaneous_input_kbps",
-	"instantaneous_output_kbps":   "instantaneous_output_kbps",
-	"sync_full":                   "sync_full",
-	"sync_partial_ok":             "sync_partial_ok",
-	"sync_partial_err":            "sync_partial_err",
-	"expired_keys":                "expired_keys",
-	"evicted_keys":                "evicted_keys",
-	"keyspace_hits":               "keyspace_hits",
-	"keyspace_misses":             "keyspace_misses",
-	"pubsub_channels":             "pubsub_channels",
-	"pubsub_patterns":             "pubsub_patterns",
-	"latest_fork_usec":            "latest_fork_usec",
-	"connected_slaves":            "connected_slaves",
-	"master_repl_offset":          "master_repl_offset",
-	"master_last_io_seconds_ago":  "master_last_io_seconds_ago",
-	"repl_backlog_active":         "repl_backlog_active",
-	"repl_backlog_size":           "repl_backlog_size",
-	"repl_backlog_histlen":        "repl_backlog_histlen",
-	"mem_fragmentation_ratio":     "mem_fragmentation_ratio",
-	"used_cpu_sys":                "used_cpu_sys",
-	"used_cpu_user":               "used_cpu_user",
-	"used_cpu_sys_children":       "used_cpu_sys_children",
-	"used_cpu_user_children":      "used_cpu_user_children",
-	"role": "replication_role",
+	"uptime_in_seconds": "uptime",
+	"connected_clients": "clients",
+	"role":              "replication_role",
 }
 
 var ErrProtocolError = errors.New("redis protocol error")
@@ -97,7 +65,6 @@ func (r *Redis) Gather(acc telegraf.Accumulator) error {
 	}
 
 	var wg sync.WaitGroup
-	errChan := errchan.New(len(r.Servers))
 	for _, serv := range r.Servers {
 		if !strings.HasPrefix(serv, "tcp://") && !strings.HasPrefix(serv, "unix://") {
 			serv = "tcp://" + serv
@@ -105,7 +72,8 @@ func (r *Redis) Gather(acc telegraf.Accumulator) error {
 
 		u, err := url.Parse(serv)
 		if err != nil {
-			return fmt.Errorf("Unable to parse to address '%s': %s", serv, err)
+			acc.AddError(fmt.Errorf("Unable to parse to address '%s': %s", serv, err))
+			continue
 		} else if u.Scheme == "" {
 			// fallback to simple string based address (i.e. "10.0.0.1:10000")
 			u.Scheme = "tcp"
@@ -122,12 +90,12 @@ func (r *Redis) Gather(acc telegraf.Accumulator) error {
 		wg.Add(1)
 		go func(serv string) {
 			defer wg.Done()
-			errChan.C <- r.gatherServer(u, acc)
+			acc.AddError(r.gatherServer(u, acc))
 		}(serv)
 	}
 
 	wg.Wait()
-	return errChan.Error()
+	return nil
 }
 
 func (r *Redis) gatherServer(addr *url.URL, acc telegraf.Accumulator) error {
@@ -188,7 +156,8 @@ func gatherInfoOutput(
 	acc telegraf.Accumulator,
 	tags map[string]string,
 ) error {
-	var keyspace_hits, keyspace_misses uint64 = 0, 0
+	var section string
+	var keyspace_hits, keyspace_misses int64
 
 	scanner := bufio.NewScanner(rdr)
 	fields := make(map[string]interface{})
@@ -198,7 +167,13 @@ func gatherInfoOutput(
 			break
 		}
 
-		if len(line) == 0 || line[0] == '#' {
+		if len(line) == 0 {
+			continue
+		}
+		if line[0] == '#' {
+			if len(line) > 2 {
+				section = line[2:]
+			}
 			continue
 		}
 
@@ -206,42 +181,63 @@ func gatherInfoOutput(
 		if len(parts) < 2 {
 			continue
 		}
-
 		name := string(parts[0])
-		metric, ok := Tracking[name]
-		if !ok {
-			kline := strings.TrimSpace(string(parts[1]))
-			gatherKeyspaceLine(name, kline, acc, tags)
+
+		if section == "Server" {
+			if name != "lru_clock" && name != "uptime_in_seconds" && name != "redis_version" {
+				continue
+			}
+		}
+
+		if name == "mem_allocator" {
 			continue
 		}
 
+		if strings.HasSuffix(name, "_human") {
+			continue
+		}
+
+		metric, ok := Tracking[name]
+		if !ok {
+			if section == "Keyspace" {
+				kline := strings.TrimSpace(string(parts[1]))
+				gatherKeyspaceLine(name, kline, acc, tags)
+				continue
+			}
+			metric = name
+		}
+
 		val := strings.TrimSpace(parts[1])
-		ival, err := strconv.ParseUint(val, 10, 64)
 
-		if name == "keyspace_hits" {
-			keyspace_hits = ival
+		// Try parsing as int
+		if ival, err := strconv.ParseInt(val, 10, 64); err == nil {
+			switch name {
+			case "keyspace_hits":
+				keyspace_hits = ival
+			case "keyspace_misses":
+				keyspace_misses = ival
+			case "rdb_last_save_time":
+				// influxdb can't calculate this, so we have to do it
+				fields["rdb_last_save_time_elapsed"] = time.Now().Unix() - ival
+			}
+			fields[metric] = ival
+			continue
 		}
 
-		if name == "keyspace_misses" {
-			keyspace_misses = ival
+		// Try parsing as a float
+		if fval, err := strconv.ParseFloat(val, 64); err == nil {
+			fields[metric] = fval
+			continue
 		}
+
+		// Treat it as a string
 
 		if name == "role" {
 			tags["replication_role"] = val
 			continue
 		}
 
-		if err == nil {
-			fields[metric] = ival
-			continue
-		}
-
-		fval, err := strconv.ParseFloat(val, 64)
-		if err != nil {
-			return err
-		}
-
-		fields[metric] = fval
+		fields[metric] = val
 	}
 	var keyspace_hitrate float64 = 0.0
 	if keyspace_hits != 0 || keyspace_misses != 0 {
@@ -272,7 +268,7 @@ func gatherKeyspaceLine(
 		dbparts := strings.Split(line, ",")
 		for _, dbp := range dbparts {
 			kv := strings.Split(dbp, "=")
-			ival, err := strconv.ParseUint(kv[1], 10, 64)
+			ival, err := strconv.ParseInt(kv[1], 10, 64)
 			if err == nil {
 				fields[kv[0]] = ival
 			}

@@ -5,16 +5,16 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/gonuts/go-shellquote"
+	"github.com/kballard/go-shellquote"
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/internal"
-	"github.com/influxdata/telegraf/internal/errchan"
 	"github.com/influxdata/telegraf/plugins/inputs"
 	"github.com/influxdata/telegraf/plugins/parsers"
 	"github.com/influxdata/telegraf/plugins/parsers/nagios"
@@ -35,7 +35,7 @@ const sampleConfig = `
   name_suffix = "_mycollector"
 
   ## Data format to consume.
-  ## Each data format has it's own unique set of configuration options, read
+  ## Each data format has its own unique set of configuration options, read
   ## more about them here:
   ## https://github.com/influxdata/telegraf/blob/master/docs/DATA_FORMATS_INPUT.md
   data_format = "influx"
@@ -48,8 +48,7 @@ type Exec struct {
 
 	parser parsers.Parser
 
-	runner  Runner
-	errChan chan error
+	runner Runner
 }
 
 func NewExec() *Exec {
@@ -114,7 +113,34 @@ func (c CommandRunner) Run(
 		}
 	}
 
+	out = removeCarriageReturns(out)
 	return out.Bytes(), nil
+}
+
+// removeCarriageReturns removes all carriage returns from the input if the
+// OS is Windows. It does not return any errors.
+func removeCarriageReturns(b bytes.Buffer) bytes.Buffer {
+	if runtime.GOOS == "windows" {
+		var buf bytes.Buffer
+		for {
+			byt, er := b.ReadBytes(0x0D)
+			end := len(byt)
+			if nil == er {
+				end -= 1
+			}
+			if nil != byt {
+				buf.Write(byt[:end])
+			} else {
+				break
+			}
+			if nil != er {
+				break
+			}
+		}
+		b = buf
+	}
+	return b
+
 }
 
 func (e *Exec) ProcessCommand(command string, acc telegraf.Accumulator, wg *sync.WaitGroup) {
@@ -122,13 +148,13 @@ func (e *Exec) ProcessCommand(command string, acc telegraf.Accumulator, wg *sync
 
 	out, err := e.runner.Run(e, command, acc)
 	if err != nil {
-		e.errChan <- err
+		acc.AddError(err)
 		return
 	}
 
 	metrics, err := e.parser.Parse(out)
 	if err != nil {
-		e.errChan <- err
+		acc.AddError(err)
 	} else {
 		for _, metric := range metrics {
 			acc.AddFields(metric.Name(), metric.Fields(), metric.Tags(), metric.Time())
@@ -165,7 +191,8 @@ func (e *Exec) Gather(acc telegraf.Accumulator) error {
 
 		matches, err := filepath.Glob(cmdAndArgs[0])
 		if err != nil {
-			return err
+			acc.AddError(err)
+			continue
 		}
 
 		if len(matches) == 0 {
@@ -186,15 +213,12 @@ func (e *Exec) Gather(acc telegraf.Accumulator) error {
 		}
 	}
 
-	errChan := errchan.New(len(commands))
-	e.errChan = errChan.C
-
 	wg.Add(len(commands))
 	for _, command := range commands {
 		go e.ProcessCommand(command, acc, &wg)
 	}
 	wg.Wait()
-	return errChan.Error()
+	return nil
 }
 
 func init() {

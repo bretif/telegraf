@@ -29,18 +29,24 @@ func (_ *NetResponse) Description() string {
 
 var sampleConfig = `
   ## Protocol, must be "tcp" or "udp"
+  ## NOTE: because the "udp" protocol does not respond to requests, it requires
+  ## a send/expect string pair (see below).
   protocol = "tcp"
   ## Server address (default localhost)
-  address = "github.com:80"
+  address = "localhost:80"
   ## Set timeout
   timeout = "1s"
 
-  ## Optional string sent to the server
-  # send = "ssh"
-  ## Optional expected string in answer
-  # expect = "ssh"
   ## Set read timeout (only used if expecting a response)
   read_timeout = "1s"
+
+  ## The following options are required for UDP checks. For TCP, they are
+  ## optional. The plugin will send the given string to the server and then
+  ## expect to receive the given 'expect' string back.
+  ## string sent to the server
+  # send = "ssh"
+  ## expected string in answer
+  # expect = "ssh"
 `
 
 func (_ *NetResponse) SampleConfig() string {
@@ -58,7 +64,12 @@ func (n *NetResponse) TcpGather() (map[string]interface{}, error) {
 	responseTime := time.Since(start).Seconds()
 	// Handle error
 	if err != nil {
-		return nil, err
+		if e, ok := err.(net.Error); ok && e.Timeout() {
+			fields["result_type"] = "timeout"
+		} else {
+			fields["result_type"] = "connection_failed"
+		}
+		return fields, nil
 	}
 	defer conn.Close()
 	// Send string if needed
@@ -82,17 +93,21 @@ func (n *NetResponse) TcpGather() (map[string]interface{}, error) {
 		// Handle error
 		if err != nil {
 			fields["string_found"] = false
+			fields["result_type"] = "read_failed"
 		} else {
 			// Looking for string in answer
 			RegEx := regexp.MustCompile(`.*` + n.Expect + `.*`)
 			find := RegEx.FindString(string(data))
 			if find != "" {
+				fields["result_type"] = "success"
 				fields["string_found"] = true
 			} else {
+				fields["result_type"] = "string_mismatch"
 				fields["string_found"] = false
 			}
 		}
-
+	} else {
+		fields["result_type"] = "success"
 	}
 	fields["response_time"] = responseTime
 	return fields, nil
@@ -108,11 +123,12 @@ func (n *NetResponse) UdpGather() (map[string]interface{}, error) {
 	LocalAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
 	// Connecting
 	conn, err := net.DialUDP("udp", LocalAddr, udpAddr)
-	defer conn.Close()
 	// Handle error
 	if err != nil {
-		return nil, err
+		fields["result_type"] = "connection_failed"
+		return fields, nil
 	}
+	defer conn.Close()
 	// Send string
 	msg := []byte(n.Send)
 	conn.Write(msg)
@@ -126,14 +142,17 @@ func (n *NetResponse) UdpGather() (map[string]interface{}, error) {
 	responseTime := time.Since(start).Seconds()
 	// Handle error
 	if err != nil {
-		return nil, err
+		fields["result_type"] = "read_failed"
+		return fields, nil
 	} else {
 		// Looking for string in answer
 		RegEx := regexp.MustCompile(`.*` + n.Expect + `.*`)
 		find := RegEx.FindString(string(buf))
 		if find != "" {
+			fields["result_type"] = "success"
 			fields["string_found"] = true
 		} else {
+			fields["result_type"] = "string_mismatch"
 			fields["string_found"] = false
 		}
 	}
