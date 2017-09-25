@@ -53,10 +53,12 @@ func (s *DiskStats) Gather(acc telegraf.Accumulator) error {
 			// Skip dummy filesystem (procfs, cgroupfs, ...)
 			continue
 		}
+		mountOpts := parseOptions(partitions[i].Opts)
 		tags := map[string]string{
 			"path":   du.Path,
 			"device": strings.Replace(partitions[i].Device, "/dev/", "", -1),
 			"fstype": du.Fstype,
+			"mode":   mountOpts.Mode(),
 		}
 		var used_percent float64
 		if du.Used+du.Free > 0 {
@@ -125,25 +127,12 @@ func (_ *DiskIOStats) SampleConfig() string {
 }
 
 func (s *DiskIOStats) Gather(acc telegraf.Accumulator) error {
-	diskio, err := s.ps.DiskIO()
+	diskio, err := s.ps.DiskIO(s.Devices)
 	if err != nil {
 		return fmt.Errorf("error getting disk io info: %s", err)
 	}
 
-	var restrictDevices bool
-	devices := make(map[string]bool)
-	if len(s.Devices) != 0 {
-		restrictDevices = true
-		for _, dev := range s.Devices {
-			devices[dev] = true
-		}
-	}
-
 	for _, io := range diskio {
-		_, member := devices[io.Name]
-		if restrictDevices && !member {
-			continue
-		}
 		tags := map[string]string{}
 		tags["name"] = s.diskName(io.Name)
 		for t, v := range s.diskTags(io.Name) {
@@ -165,6 +154,7 @@ func (s *DiskIOStats) Gather(acc telegraf.Accumulator) error {
 			"read_time":        io.ReadTime,
 			"write_time":       io.WriteTime,
 			"io_time":          io.IoTime,
+			"weighted_io_time": io.WeightedIO,
 			"iops_in_progress": io.IopsInProgress,
 		}
 		acc.AddCounter("diskio", fields, tags)
@@ -231,12 +221,38 @@ func (s *DiskIOStats) diskTags(devName string) map[string]string {
 	return tags
 }
 
+type MountOptions []string
+
+func (opts MountOptions) Mode() string {
+	if opts.exists("rw") {
+		return "rw"
+	} else if opts.exists("ro") {
+		return "ro"
+	} else {
+		return "unknown"
+	}
+}
+
+func (opts MountOptions) exists(opt string) bool {
+	for _, o := range opts {
+		if o == opt {
+			return true
+		}
+	}
+	return false
+}
+
+func parseOptions(opts string) MountOptions {
+	return strings.Split(opts, ",")
+}
+
 func init() {
+	ps := newSystemPS()
 	inputs.Add("disk", func() telegraf.Input {
-		return &DiskStats{ps: &systemPS{}}
+		return &DiskStats{ps: ps}
 	})
 
 	inputs.Add("diskio", func() telegraf.Input {
-		return &DiskIOStats{ps: &systemPS{}, SkipSerialNumber: true}
+		return &DiskIOStats{ps: ps, SkipSerialNumber: true}
 	})
 }
